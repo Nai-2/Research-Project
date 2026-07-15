@@ -62,46 +62,53 @@ class RecommenderUI:
         self.root.update()
         try:
             # 元コードのクラスをインスタンス化
+            # 音声特徴ベクトルと楽曲データベースを突き合わせるマネージャー
             self.matcher = mr.VectorMatchManager()
+            # YAMNetを使って音を特徴ベクトルに変換
             self.yamnet = mr.YAMNetManager()
+            #マイクから入ってくる音声を一時的に保存するバッファを管理するクラス
             self.streamer = mr.AudioStreamer()
             
             self.status_label.config(text="ステータス: 待機中", fg="#333")
             self.start_btn.config(state=tk.NORMAL)
-            self.log_message("✅ 初期化完了！「監視スタート」ボタンを押してください。")
+            self.log_message("初期化完了！「スタート」ボタンを押してください。")
         except Exception as e:
-            self.log_message(f"❌ 初期化エラー: {e}")
+            self.log_message(f"初期化エラー: {e}")
             self.status_label.config(text="ステータス: エラー", fg="red")
 
     def log_message(self, message):
         # スレッドセーフにログを更新するための処理
         self.root.after(0, self._append_log, message)
 
+    #ログエリアにメッセージを追加する内部関数
     def _append_log(self, message):
         self.log_area.config(state='normal')
         self.log_area.insert(tk.END, message + "\n")
         self.log_area.see(tk.END)
         self.log_area.config(state='disabled')
 
+    #現在の推奨トラックをUIに表示する関数
     def update_song_display(self, song_name):
         self.root.after(0, lambda: self.current_song_label.config(text=song_name))
 
+    #音声録音開始
     def start_monitoring(self):
         self.is_running = True
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
-        self.status_label.config(text="ステータス: 🎤 監視中...", fg="#4caf50")
+        self.status_label.config(text="ステータス: リスニング中...", fg="#4caf50")
         
         # マイクを別スレッドで開始（UIをフリーズさせないため）
         self.thread = threading.Thread(target=self.run_system_loop, daemon=True)
         self.thread.start()
-
+        
+    #音声録音停止
     def stop_monitoring(self):
         self.is_running = False
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
         self.status_label.config(text="ステータス: ⏹ 停止中", fg="#f44336")
-        self.log_message("\n⏹️ システムを停止しました。")
+        self.log_message("\nシステムを停止しました。")
 
     def run_system_loop(self):
         # 元コードの main() に相当する処理
@@ -110,13 +117,16 @@ class RecommenderUI:
             blocksize=mr.Config.CHUNK_SIZE, callback=self.streamer.callback
         )
         
+        # 現在画面に表示されている推奨トラックを保持する変数
         current_playing = None
         self.log_message("-------------------------------------------------")
-        self.log_message("🎤 マイク開始 (軽量テキスト推論モード)")
+        self.log_message("マイク開始")
         
+        #
         with stream:
+            #self.is.runningは録音中かどうか
             while self.is_running:
-                # 8秒待機（UIがフリーズしないよう1秒ずつチェック）
+                # 8秒分の音声を録音しつつ、UIがフリーズしないように1秒ごとにチェック
                 for _ in range(8):
                     if not self.is_running:
                         break
@@ -126,20 +136,20 @@ class RecommenderUI:
                     break
 
                 self.streamer.update_buffer()
-                self.log_message("🔄 潜在空間で波形を検索中...")
+                self.log_message("波形を検索中...")
                 
                 env_vector = self.yamnet.extract_vector(self.streamer.buffer)
                 best_match, similarity = self.matcher.find_best_match(env_vector)
                 
                 if best_match:
                     if best_match != current_playing:
-                        self.log_message(f"🎧 [マッチ成功] 👉 推奨トラック: 『 {best_match} 』 (類似度: {similarity:.4f})")
+                        self.log_message(f"[マッチ成功] 推奨トラック: 『 {best_match} 』 (類似度: {similarity:.4f})")
                         self.update_song_display(best_match)
                         current_playing = best_match
                     else:
                         self.log_message(f"    (類似度: {similarity:.4f} / ムード継続: {best_match})")
                 else:
-                    self.log_message("🎧 (マッチする楽曲が見つかりませんでした)")
+                    self.log_message("(マッチする楽曲が見つかりませんでした)")
                 
                 self.log_message("-------------------------------------------------")
 
