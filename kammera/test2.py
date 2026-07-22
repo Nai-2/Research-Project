@@ -26,7 +26,17 @@ class Config:
     TRACKS_CSV_FILE = 'tracks.csv'
     KEYWORD_DB_FILE = 'music_yamnet_keywords_db.pkl'
 
-EXCLUDE_GENRES = []
+EXCLUDE_GENRES = [] #<==除外するジャンル名を入れる
+
+#fma_small に含まれるジャンルと曲数:
+#Hip-Hop          1000
+#Pop              1000
+#Folk             1000
+#Experimental     1000
+#Rock             1000
+#International    1000
+#Electronic       1000
+#Instrumental     1000
 
 print("📂 トラックのメタデータを読み込み中...")
 tracks = pd.read_csv(Config.TRACKS_CSV_FILE, index_col=0, header=[0, 1])
