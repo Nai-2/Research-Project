@@ -26,8 +26,7 @@ class Config:
     TRACKS_CSV_FILE = 'tracks.csv'
     KEYWORD_DB_FILE = 'music_yamnet_keywords_db.pkl'
 
-EXCLUDE_GENRES = [#'Experimental', 'Instrumental'
-]
+EXCLUDE_GENRES = []
 
 print("📂 トラックのメタデータを読み込み中...")
 tracks = pd.read_csv(Config.TRACKS_CSV_FILE, index_col=0, header=[0, 1])
