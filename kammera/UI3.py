@@ -15,7 +15,7 @@ from tkinter.scrolledtext import ScrolledText
 
 # 元の解析コードのファイル名を、拡張子なしで指定します。
 # 元コードが test3.py の場合は "test3"
-ENGINE_MODULE = "test3"
+ENGINE_MODULE = "test4"
 
 SUPPORTED_FILE_TYPES = [
     (
