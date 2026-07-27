@@ -130,28 +130,66 @@ def execute_multi_profile_search(target_video_file):
     stage1_scores.sort(key=lambda x: x[1], reverse=True)
     top_candidates = stage1_scores[:Config.TOP_N]
 
-    # [Stage 2] 局所特徴とキーワードの算出 (重み付け前に全候補の各スコアを計算)
+    # [Stage 2] 全区間チャンク分割による波形シンクロ解析 ＆ キーワード評価
+    print(f"🔍 [Stage 2] 動画全編のチャンク分割による構成シンクロ解析中...")
     target_mfcc_t = target_mfcc.T
-    compare_len = min(target_mfcc_t.shape[1], int((Config.WINDOW_SEC * Config.SR) / Config.HOP_LENGTH))
-    target_sub = target_mfcc_t[:, :compare_len]
+    target_len_frames = target_mfcc_t.shape[1]
     step_frames = int(1 * Config.SR / Config.HOP_LENGTH)
+    
+    # 🌟 動画全体を WINDOW_SEC ごとにチャンク（断片）分割
+    window_frames = int((Config.WINDOW_SEC * Config.SR) / Config.HOP_LENGTH)
+    target_chunks = []
+    for i in range(0, target_len_frames, window_frames):
+        target_chunks.append(target_mfcc_t[:, i:i+window_frames])
+        
+    print(f"   (動画を {len(target_chunks)} 個の断片に切り分けて評価します)")
     
     candidate_metrics = []
     
     for song_name, yamnet_sim in top_candidates:
-        # MFCCの波形シンクロスコア算出
+        # MFCCの波形シンクロスコア算出 (チャンク平均)
         song_mfcc = mfcc_db[song_name].get('mfcc', mfcc_db[song_name]) if isinstance(mfcc_db[song_name], dict) else mfcc_db[song_name]
         song_mfcc_t = song_mfcc.T
+        song_len_frames = song_mfcc_t.shape[1]
         
         best_local_sim, best_start_idx = -1.0, 0
-        for start_idx in range(0, max(1, song_mfcc_t.shape[1] - compare_len), step_frames):
-            song_sub = song_mfcc_t[:, start_idx : start_idx + compare_len]
-            if song_sub.shape[1] == compare_len:
-                diff = target_sub - song_sub
-                dist = np.linalg.norm(diff) / compare_len
-                local_sim = np.exp(-dist * 1.5)
-                if local_sim > best_local_sim:
-                    best_local_sim = local_sim
+        
+        # 楽曲の中で動画の全長をスライドできる最大範囲
+        max_start = max(1, song_len_frames - target_len_frames + 1)
+        
+        for start_idx in range(0, max_start, step_frames):
+            chunk_sims = []
+            curr_start = start_idx
+            
+            # 分割したすべての断片について、楽曲側の対応する時間軸と比較
+            for t_chunk in target_chunks:
+                t_chunk_len = t_chunk.shape[1]
+                
+                # 楽曲の尺が足りない場合はその断片で打ち切り
+                if curr_start + t_chunk_len > song_len_frames:
+                    break
+                    
+                s_chunk = song_mfcc_t[:, curr_start : curr_start + t_chunk_len]
+                
+                if s_chunk.shape[1] == t_chunk_len:
+                    diff = t_chunk - s_chunk
+                    dist = np.linalg.norm(diff) / t_chunk_len
+                    sim = np.exp(-dist * 1.5)
+                    chunk_sims.append(sim)
+                
+                curr_start += t_chunk_len
+            
+            # 🌟 強く似ている部分を強調するためのスコア計算
+            if chunk_sims:
+                avg_sim = sum(chunk_sims) / len(chunk_sims)
+                max_sim = max(chunk_sims) # 抽出した断片の中で最もシンクロ度が高かった値
+                
+                # 平均値だけでなく「最大値」も評価に組み込む (平均 60% + 最大値 40%)
+                # これにより「全体的にそこそこ」な曲よりも、「どこか一部が神がかって合っている」曲が評価されやすくなります
+                boosted_sim = (avg_sim * 0.6) + (max_sim * 0.4)
+                
+                if boosted_sim > best_local_sim:
+                    best_local_sim = boosted_sim
                     best_start_idx = start_idx
         
         # キーワード一致スコア算出 (上位から重み付け)
