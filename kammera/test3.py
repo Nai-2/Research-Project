@@ -347,4 +347,6 @@ def execute_multi_profile_search(target_video_file):
             win_disp = f"{cand['window_sec']}秒" if cand['window_sec'] != '-' else '-'
             print(f"{i+1:<4} | {cand['final_score']:.4f}     | {cand['name']:<20} | {cand['time_sec']:5.1f}秒付近 | {win_disp:<6} | {cand['match_count']}件")
 
-execute_multi_profile_search('IMG_7081.MOV')  # ここに解析したい動画ファイルのパスを指定
+#execute_multi_profile_search('IMG_6974.MOV')  # ここに解析したい動画ファイルのパスを指定
+if __name__ == "__main__":
+    execute_multi_profile_search("IMG_7081.MOV")
