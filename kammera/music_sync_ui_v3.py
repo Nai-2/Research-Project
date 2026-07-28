@@ -11,10 +11,6 @@
   動画のトーナリティ(音程感)が閾値未満の場合、クロマ(メロディ)重みを
   自動で減衰させ、削った分を他の指標へ比例再配分する。
   減衰の有無・理由はUI上に明示される。
-- 🌟 メロディ一致タイムライン:
-  「動画の何秒〜何秒」が「曲の何秒〜何秒」のどんな音程と一致したかを
-  チャンク単位で一覧表示する。ランキングの行をクリックすると
-  その曲のタイムラインに切り替わる。
 """
 
 import os
@@ -69,24 +65,20 @@ ALL_GENRES = ["Hip-Hop", "Pop", "Folk", "Experimental",
 
 RESULT_TOP_K = 10  # ランキング表示件数
 
-# 🌟 クロマの12次元インデックス → 音名 の対応表 (一致音程の表示に使う)
-NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-PITCH_TOP_N = 3  # 動画/曲それぞれから抽出する主要音程の個数
-
 
 # =========================================================
 # モデル・DBのロード (起動時に1回だけ)
 # =========================================================
-print("📂 トラックのメタデータを読み込み中...")
+print("トラックのメタデータを読み込み中...")
 tracks = pd.read_csv(Config.TRACKS_CSV_FILE, index_col=0, header=[0, 1])
 
-print("🧠 YAMNetモデルをロード中...")
+print("YAMNetモデルをロード中...")
 yamnet_model = hub.load('https://tfhub.dev/google/yamnet/1')
 _cmp = yamnet_model.class_map_path().numpy()
 _cmp = _cmp.decode('utf-8') if isinstance(_cmp, bytes) else str(_cmp)
 class_names = pd.read_csv(_cmp)['display_name'].tolist()
 
-print("💾 データベースを読み込み中...")
+print("データベースを読み込み中...")
 with open(Config.YAMNET_DB_FILE, 'rb') as f:
     raw_yamnet_db = pickle.load(f)
 with open(Config.MFCC_DB_FILE, 'rb') as f:
@@ -113,7 +105,7 @@ def genre_of(song_name):
         return None
 
 genre_cache = {name: genre_of(name) for name in raw_yamnet_db.keys()}
-print(f"✅ 準備完了 (全楽曲: {len(raw_yamnet_db)}曲 / クロマDB: {'あり' if chroma_available else 'なし'})")
+print(f" 準備完了 (全楽曲: {len(raw_yamnet_db)}曲 / クロマDB: {'あり' if chroma_available else 'なし'})")
 
 
 # =========================================================
@@ -239,17 +231,16 @@ def compute_sync_score(song_mfcc_t, target_chunks, step_frames):
 
 
 def compute_chroma_sync_score(song_chroma, chunk_infos, step_frames):
-    """🌟 最良スコアに加えて、そのときの移調量(shift)と
-    楽曲側の開始フレーム(start)も返す。
+    """クロマ(メロディ・和声)のシンクロ度を計算する。
     chunk_infos: [(mean_chroma_12, length, is_active, video_start_frame), ...]
-    返り値: (best_score, best_shift, best_start_frame)"""
+    返り値: 最良シンクロ度 (0〜1, 失敗時は0)"""
     if song_chroma is None or not chunk_infos:
-        return 0.0, 0, 0
+        return 0.0
     song_len = song_chroma.shape[1]
     total = sum(l for _, l, _, _ in chunk_infos)
     max_start = max(1, song_len - total + 1)
     csum = np.concatenate([np.zeros((12, 1)), np.cumsum(song_chroma, axis=1)], axis=1)
-    best, best_shift, best_start = 0.0, 0, 0
+    best = 0.0
     for shift in range(12 if Config.KEY_INVARIANT else 1):
         shifted = []
         for mc, l, a, _ in chunk_infos:
@@ -268,80 +259,8 @@ def compute_chroma_sync_score(song_chroma, chunk_infos, step_frames):
                 cur += l
             if sims:
                 boosted = (sum(sims) / len(sims)) * 0.6 + max(sims) * 0.4
-                if boosted > best:
-                    best, best_shift, best_start = boosted, shift, start_idx
-    return best, best_shift, best_start
-
-
-def top_pitch_names(vec, top_n=PITCH_TOP_N):
-    """12次元クロマから上位 top_n の音名リストを返す"""
-    idxs = list(np.argsort(vec)[::-1][:top_n])
-    return [NOTE_NAMES[i] for i in idxs], idxs
-
-
-def build_melody_timeline(song_chroma, chunk_infos, shift, start_idx):
-    """🌟 新規追加: 最良の移調量・位置合わせにおいて、
-    「動画のどの区間 (何秒〜何秒)」が「曲のどの区間 (何秒〜何秒)」の
-    どんな音程と一致したかをチャンク単位で列挙する。
-    返り値: [{video_range, song_range, sim, v_pitches, s_pitches, common, active}, ...]"""
-    timeline = []
-    if song_chroma is None or not chunk_infos:
-        return timeline
-    song_len = song_chroma.shape[1]
-    cur = start_idx
-    for mc, l, a, v_start in chunk_infos:
-        if cur + l > song_len:
-            break
-        entry = {
-            'video_range': (frames_to_sec(v_start), frames_to_sec(v_start + l)),
-            'song_range': (frames_to_sec(cur), frames_to_sec(cur + l)),
-            'active': bool(a),
-            'sim': None, 'v_pitches': [], 's_pitches': [], 'common': [],
-        }
-        if a:
-            v_vec = np.roll(mc, shift)  # 移調後の動画クロマ (曲のキーに合わせた状態)
-            s_vec = np.mean(song_chroma[:, cur:cur + l], axis=1)
-            # スコア計算と同じ「センタリング済みコサイン(相関)」で区間の一致度を出す
-            vc, sc = v_vec - np.mean(v_vec), s_vec - np.mean(s_vec)
-            denom = (np.linalg.norm(vc) * np.linalg.norm(sc)) + 1e-8
-            entry['sim'] = max(float(np.dot(vc, sc) / denom), 0.0)
-            v_names, v_idx = top_pitch_names(v_vec)
-            s_names, s_idx = top_pitch_names(s_vec)
-            entry['v_pitches'] = v_names
-            entry['s_pitches'] = s_names
-            entry['common'] = [NOTE_NAMES[i] for i in v_idx if i in s_idx]
-        timeline.append(entry)
-        cur += l
-    return timeline
-
-
-def pitch_match_detail(song_chroma, chunk_infos, shift, start_idx, top_n=PITCH_TOP_N):
-    """最良の移調量・位置合わせにおける全体集計 (ランキング表の1行に出す要約)。
-    返り値: (一致音程の文字列, 動画側主要音程, 曲側主要音程)"""
-    if song_chroma is None or not chunk_infos:
-        return '-', '-', '-'
-    song_len = song_chroma.shape[1]
-    v_sum, s_sum, n_used = np.zeros(12), np.zeros(12), 0
-    cur = start_idx
-    for mc, l, a, _ in chunk_infos:
-        if cur + l > song_len:
-            break
-        if a:
-            v_sum += np.roll(mc, shift)  # 移調後の動画クロマ
-            s_sum += np.mean(song_chroma[:, cur:cur + l], axis=1)
-            n_used += 1
-        cur += l
-    if n_used == 0:
-        return '-', '-', '-'
-    v_names, v_idx = top_pitch_names(v_sum, top_n)
-    s_names, s_idx = top_pitch_names(s_sum, top_n)
-    common = [NOTE_NAMES[i] for i in v_idx if i in s_idx]
-    if common:
-        shift_disp = f"+{shift}" if shift > 0 else "±0"
-        c_names = f"{' '.join(common)} (移調{shift_disp})"
-    else:
-        c_names = 'なし'
-    return c_names, ' '.join(v_names), ' '.join(s_names)
+                best = max(best, boosted)
+    return best
 
 
 def find_best_window_for_song(song_mfcc_t, chunks_by_window, step_frames):
@@ -413,7 +332,6 @@ def analyze_video(video_path, excluded_genres, progress=gr.Progress()):
             infos = []
             for c, a, i in chunks:
                 l = c.shape[1]
-                # 🌟 チャンクの動画内開始フレーム i も保持する (タイムライン表示用)
                 infos.append((np.mean(feat['chroma'][:, i:i + l], axis=1), l, a, i))
             chroma_by_window[ws] = infos
 
@@ -427,33 +345,29 @@ def analyze_video(video_path, excluded_genres, progress=gr.Progress()):
         best_sim, best_start, best_win = find_best_window_for_song(
             song_mfcc.T, chunks_by_window, step_frames)
 
-        # 🌟 クロマ: スコア・移調量・曲側マッチ開始位置を受け取り、
-        # 全体集計 (pitch_match_detail) と区間ごとのタイムライン
-        # (build_melody_timeline) の両方を作る
-        chroma_score, chroma_time_sec, chroma_shift = 0.0, None, 0
-        pitch_common, pitch_video, pitch_song = '-', '-', '-'
-        melody_timeline = []
+        # クロマ(メロディ)シンクロ度: MFCCで選ばれた最適窓の分割を使って評価
+        chroma_score = 0.0
         if use_chroma and best_win in chroma_by_window:
             sc = chroma_db.get(name)
             if sc is not None:
-                chroma_score, chroma_shift, c_start = compute_chroma_sync_score(
+                chroma_score = compute_chroma_sync_score(
                     sc, chroma_by_window[best_win], step_frames)
-                chroma_time_sec = frames_to_sec(c_start)
-                pitch_common, pitch_video, pitch_song = pitch_match_detail(
-                    sc, chroma_by_window[best_win], chroma_shift, c_start)
-                melody_timeline = build_melody_timeline(
-                    sc, chroma_by_window[best_win], chroma_shift, c_start)
 
+        # 🌟 キーワード一致の判定とカウント
+        # 一致したキーワードを重複なしのリスト (matched_kws) として先に確定し、
+        # 件数は必ず len(matched_kws) から導出する。
+        # カウント用の変数を別々に持たない構成にすることで、
+        # 「表示された一覧と件数が食い違う」余地をなくしている。
         song_kws = keyword_db.get(name, [])
-        raw, matches = 0, 0
-        matched_kws = []  # 🌟 どのキーワードが一致したかを記録する
+        matched_kws = []
+        raw = 0
         max_possible = sum((Config.TOP_K_KEYWORDS - i) ** 2 for i in range(Config.TOP_K_KEYWORDS))
         for vi, kw in enumerate(feat['keywords']):
-            if kw in song_kws:
+            if kw in song_kws and kw not in matched_kws:
                 si = song_kws.index(kw)
                 raw += max(1, Config.TOP_K_KEYWORDS - vi) * max(1, Config.TOP_K_KEYWORDS - si)
-                matches += 1
                 matched_kws.append(kw)
+        matches = len(matched_kws)  # 🌟 件数は一覧の長さそのもの (常に一致する)
         kw_score = min(raw / max_possible, 1.0) if max_possible > 0 else 0.0
 
         cands.append({
@@ -464,13 +378,7 @@ def analyze_video(video_path, excluded_genres, progress=gr.Progress()):
             'keyword': kw_score,
             'chroma': chroma_score,
             'match_count': matches,
-            'matched_keywords': matched_kws,          # 🌟 一致キーワード一覧
-            'pitch_common': pitch_common,             # 🌟 一致した音程 (音名+移調量)
-            'pitch_video': pitch_video,               # 🌟 動画側の主要音程 (移調後)
-            'pitch_song': pitch_song,                 # 🌟 曲側の主要音程
-            'chroma_time_sec': chroma_time_sec,       # 🌟 メロディが一致した曲側の秒数
-            'chroma_shift': chroma_shift,             # 🌟 最良の移調量 (半音)
-            'melody_timeline': melody_timeline,       # 🌟 区間ごとの一致タイムライン
+            'matched_keywords': matched_kws,          # 一致キーワード一覧 (重複なし)
             'time_sec': float(librosa.frames_to_time(best_start, sr=Config.SR,
                                                      hop_length=Config.HOP_LENGTH)),
             'window_sec': best_win if best_win is not None else '-',
@@ -499,50 +407,9 @@ def analyze_video(video_path, excluded_genres, progress=gr.Progress()):
         f"- 音程感 (トーナリティ): **{feat['tonality']:.2f}** (0=ノイズ的 / 1=明確な音程)\n"
         f"- 検出キーワード: {', '.join(feat['keywords']) if feat['keywords'] else '(なし)'}\n"
         f"- 試した窓長候補: {window_candidates} 秒\n"
-        f"- クロマ(メロディ)軸: {'✅ 有効' if use_chroma else '❌ 無効 (クロマDBなし)'}"
+        f"- クロマ(メロディ)軸: {' 有効' if use_chroma else ' 無効 (クロマDBなし)'}"
     )
     return state, info_md
-
-
-# =========================================================
-# 🌟 メロディ一致タイムラインの表示 (Markdown生成)
-# =========================================================
-def melody_timeline_md(cand, use_chroma):
-    """1曲ぶんの「動画の区間 → 曲の区間 → 音程」対応表をMarkdownで作る"""
-    if not use_chroma:
-        return "🎼 クロマ(メロディ)軸が無効なため、タイムラインは表示できません。"
-    tl = cand.get('melody_timeline', [])
-    if not tl:
-        return f"🎼 **{cand['name']}** のメロディタイムラインはありません (クロマDB未登録の可能性)。"
-
-    shift = cand.get('chroma_shift', 0)
-    shift_disp = f"+{shift}半音" if shift > 0 else "移調なし"
-    md = (f"### 🎼 メロディ一致タイムライン: **{cand['name']}**\n"
-          f"最適窓: {cand['window_sec']}秒 / キー合わせ: **{shift_disp}** "
-          f"(動画側の音程は曲のキーに合わせて表示)\n\n")
-    md += "| 動画の区間 | → 曲の区間 | 一致度 | 動画側の音程 | 曲側の音程 | 一致した音程 |\n"
-    md += "|---|---|---|---|---|---|\n"
-    for e in tl:
-        v0, v1 = e['video_range']
-        s0, s1 = e['song_range']
-        v_rng = f"{v0:.1f}〜{v1:.1f}秒"
-        s_rng = f"{s0:.1f}〜{s1:.1f}秒"
-        if not e['active']:
-            md += f"| {v_rng} | {s_rng} | — | (静寂のためスコア除外) | | |\n"
-            continue
-        sim_disp = f"{e['sim']:.2f}" if e['sim'] is not None else '-'
-        v_p = ' '.join(e['v_pitches']) or '-'
-        s_p = ' '.join(e['s_pitches']) or '-'
-        c_p = ' '.join(e['common']) if e['common'] else 'なし'
-        # 一致度が高い区間を強調表示
-        if e['sim'] is not None and e['sim'] >= 0.7:
-            v_rng = f"**{v_rng}**"
-            s_rng = f"**{s_rng}**"
-            c_p = f"**{c_p}**"
-        md += f"| {v_rng} | {s_rng} | {sim_disp} | {v_p} | {s_p} | {c_p} |\n"
-    md += ("\n※ 一致度はその区間のクロマ相関 (0〜1)。太字は特に一致度が高い区間 (0.7以上)。"
-           "音程は各区間の主要" + str(PITCH_TOP_N) + "音を強い順に表示。")
-    return md
 
 
 # =========================================================
@@ -557,10 +424,10 @@ def effective_weights(w_mfcc, w_yamnet, w_kw, w_chroma, state,
 
     # クロマが物理的に使えない場合は強制0
     if not state['use_chroma'] and w['chroma'] > 0:
-        notes.append("⚠️ クロマDBが無いためメロディ重みは **0%** に固定されました。")
+        notes.append("クロマDBが無いためメロディ重みは **0%** に固定されました。")
         w['chroma'] = 0.0
 
-    # 🌟 メロディなし判定: トーナリティが閾値未満なら比例減衰
+    # メロディなし判定: トーナリティが閾値未満なら比例減衰
     if state['use_chroma'] and auto_melody and w['chroma'] > 0:
         t = state['tonality']
         if t < tonality_threshold:
@@ -583,7 +450,7 @@ def effective_weights(w_mfcc, w_yamnet, w_kw, w_chroma, state,
     if total < 1e-8:
         w = {'mfcc': 0.25, 'yamnet': 0.25, 'keyword': 0.25, 'chroma': 0.25 if state['use_chroma'] else 0.0}
         total = sum(w.values())
-        notes.append("⚠️ すべての重みが0だったため均等配分にしました。")
+        notes.append("すべての重みが0だったため均等配分にしました。")
     w = {k: v / total for k, v in w.items()}
     return w, notes
 
@@ -591,7 +458,7 @@ def effective_weights(w_mfcc, w_yamnet, w_kw, w_chroma, state,
 def rank_candidates(state, w_mfcc, w_yamnet, w_kw, w_chroma,
                     auto_melody, tonality_threshold):
     if not state:
-        return pd.DataFrame(), "まず動画を解析してください。", ""
+        return pd.DataFrame(), "まず動画を解析してください。"
 
     w, notes = effective_weights(w_mfcc, w_yamnet, w_kw, w_chroma,
                                  state, auto_melody, tonality_threshold)
@@ -605,12 +472,11 @@ def rank_candidates(state, w_mfcc, w_yamnet, w_kw, w_chroma,
     rows = []
     for i, c in enumerate(ranked):
         # 🌟 一致キーワードは「件数 + 一致した全キーワード」の形式で表示
-        # 例: "2件: Music, Guitar" / 一致なしなら "0件"
+        # 件数は matched_keywords の長さから直接計算するため、
+        # 一覧に表示されるキーワード数と必ず一致する。
+        # 例: "3件: Music, Speech, Guitar" / 一致なしなら "0件"
         mkws = c.get('matched_keywords', [])
         kw_disp = f"{len(mkws)}件: {', '.join(mkws)}" if mkws else "0件"
-        # 🌟 メロディの一致位置 (曲側の秒数)
-        c_time = c.get('chroma_time_sec')
-        melody_time_disp = f"{c_time:.1f}秒" if c_time is not None else '-'
         rows.append({
             '順位': i + 1,
             '曲名': c['name'],
@@ -618,12 +484,10 @@ def rank_candidates(state, w_mfcc, w_yamnet, w_kw, w_chroma,
             '総合スコア': round(c['final'], 4),
             'マッチ開始': f"{c['time_sec']:.1f}秒",
             '最適窓': f"{c['window_sec']}秒" if c['window_sec'] != '-' else '-',
-            '一致キーワード': kw_disp,                       # 🌟 どのKWが一致したか
-            '一致音程': c.get('pitch_common', '-'),          # 🌟 どの音程で一致したか
-            'メロディ一致位置': melody_time_disp,            # 🌟 音程が一致した曲側の秒数
+            '一致キーワード': kw_disp,                       # 件数 + 一致した全KW
             '波形': round(c['mfcc_norm'], 2),
             '雰囲気': round(c['yamnet_norm'], 2),
-            # 🌟 正規化値(候補内の相対値)だと「一致があるのに0.00」と表示され
+            # 正規化値(候補内の相対値)だと「一致があるのに0.00」と表示され
             # 誤解を招くため、表示は生のキーワードスコア(絶対値)にする。
             # ランキング計算には従来どおり正規化値(keyword_norm)を使用。
             'キーワード': round(c['keyword'], 3),
@@ -637,28 +501,7 @@ def rank_candidates(state, w_mfcc, w_yamnet, w_kw, w_chroma,
     )
     if notes:
         weight_md += "\n\n" + "\n\n".join(notes)
-
-    # 🌟 デフォルトでは1位の曲のメロディタイムラインを表示
-    # (ランキングの行をクリックするとその曲に切り替わる)
-    melody_md = melody_timeline_md(ranked[0], state['use_chroma']) if ranked else ""
-    if ranked:
-        melody_md = "💡 ランキングの行をクリックすると、その曲のタイムラインに切り替わります。\n\n" + melody_md
-    return df, weight_md, melody_md
-
-
-def show_melody_detail(state, df, evt: gr.SelectData):
-    """🌟 ランキング表の行クリックで、その曲のメロディタイムラインを表示する"""
-    if not state or df is None or len(df) == 0:
-        return ""
-    try:
-        row = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
-        song_name = df.iloc[row]['曲名']
-    except Exception:
-        return ""
-    for c in state['candidates']:
-        if c['name'] == song_name:
-            return melody_timeline_md(c, state['use_chroma'])
-    return ""
+    return df, weight_md
 
 
 # =========================================================
@@ -681,7 +524,7 @@ def apply_preset(name):
 # =========================================================
 # UI 構築
 # =========================================================
-# 🌟 プリセットのドロップダウンやジャンルのチェックボックスが
+# プリセットのドロップダウンやジャンルのチェックボックスが
 # 他の要素と違うフォントで表示されるのを防ぐため、
 # UI全体に同一のフォントスタックを強制する
 FONT_STACK = ("'Hiragino Kaku Gothic ProN', 'Hiragino Sans', 'Noto Sans JP', "
@@ -698,7 +541,7 @@ with gr.Blocks(title="動画×楽曲シンクロ検索",
                theme=gr.themes.Soft(font=[gr.themes.GoogleFont("Noto Sans JP"),
                                           "system-ui", "sans-serif"]),
                css=CUSTOM_CSS) as demo:
-    gr.Markdown("# 🎬🎵 動画×楽曲シンクロ検索\n"
+    gr.Markdown("# 動画×楽曲シンクロ検索\n"
                 "動画をアップロードすると、雰囲気・波形・キーワード・メロディの4軸で"
                 "シンクロする楽曲を検索します。重みはスライダーでリアルタイムに調整できます。")
 
@@ -711,24 +554,24 @@ with gr.Blocks(title="動画×楽曲シンクロ検索",
             genre_excl = gr.CheckboxGroup(
                 choices=ALL_GENRES,
                 value=["Experimental", "Electronic"],
-                label="🚫 除外するジャンル",
+                label="除外するジャンル",
                 info="チェックしたジャンルの曲は検索対象から外れます",
             )
-            analyze_btn = gr.Button("🔍 解析を実行", variant="primary")
+            analyze_btn = gr.Button("解析を実行", variant="primary")
             info_out = gr.Markdown("")
 
         # ---------- 右カラム: 重み調整とランキング ----------
         with gr.Column(scale=2):
-            with gr.Accordion("🎚️ 重み調整 (合計は自動で100%に正規化されます)", open=True):
+            with gr.Accordion("重み調整 (合計は自動で100%に正規化されます)", open=True):
                 preset_dd = gr.Dropdown(
                     choices=list(PRESETS.keys()), value="⚖️ バランス型",
                     label="プリセット", info="選ぶとスライダーに反映されます")
                 with gr.Row():
-                    s_mfcc = gr.Slider(0, 1, value=0.15, step=0.05, label="🌊 波形 (MFCC)")
-                    s_yamnet = gr.Slider(0, 1, value=0.55, step=0.05, label="🎷 雰囲気 (YAMNet)")
+                    s_mfcc = gr.Slider(0, 1, value=0.15, step=0.05, label="波形 (MFCC)")
+                    s_yamnet = gr.Slider(0, 1, value=0.55, step=0.05, label=" 雰囲気 (YAMNet)")
                 with gr.Row():
-                    s_kw = gr.Slider(0, 1, value=0.15, step=0.05, label="📝 キーワード")
-                    s_chroma = gr.Slider(0, 1, value=0.15, step=0.05, label="🎼 メロディ (クロマ)")
+                    s_kw = gr.Slider(0, 1, value=0.15, step=0.05, label="キーワード")
+                    s_chroma = gr.Slider(0, 1, value=0.15, step=0.05, label="メロディ (クロマ)")
                 with gr.Row():
                     auto_melody = gr.Checkbox(
                         value=True, label="メロディなし動画では自動的にメロディ重みを減衰する",
@@ -738,14 +581,12 @@ with gr.Blocks(title="動画×楽曲シンクロ検索",
                         info="この値未満なら「メロディなし」とみなす")
 
             weight_out = gr.Markdown("")
-            result_df = gr.Dataframe(label=f"🏆 ランキング (上位{RESULT_TOP_K}曲)",
+            result_df = gr.Dataframe(label=f"ランキング (上位{RESULT_TOP_K}曲)",
                                      interactive=False, wrap=True)
-            # 🌟 メロディ一致タイムライン (行クリックで曲を切り替え)
-            melody_out = gr.Markdown("")
 
     # ---------- イベント配線 ----------
     rank_inputs = [analysis_state, s_mfcc, s_yamnet, s_kw, s_chroma, auto_melody, tonality_th]
-    rank_outputs = [result_df, weight_out, melody_out]
+    rank_outputs = [result_df, weight_out]
 
     analyze_btn.click(
         fn=analyze_video, inputs=[video_in, genre_excl],
@@ -759,12 +600,8 @@ with gr.Blocks(title="動画×楽曲シンクロ検索",
     for comp in (s_mfcc, s_yamnet, s_kw, s_chroma, auto_melody, tonality_th):
         comp.change(fn=rank_candidates, inputs=rank_inputs, outputs=rank_outputs)
 
-    # 🌟 ランキングの行クリック → その曲のメロディタイムラインを表示
-    result_df.select(fn=show_melody_detail, inputs=[analysis_state, result_df],
-                     outputs=[melody_out])
-
 
 if __name__ == "__main__":
-    # 🌟 inbrowser=True: 起動と同時に既定のブラウザで自動的にUIが開く
+    # inbrowser=True: 起動と同時に既定のブラウザで自動的にUIが開く
     # (URLを手入力・検索する必要がなくなる)
     demo.launch(inbrowser=True)
