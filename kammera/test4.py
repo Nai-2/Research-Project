@@ -476,10 +476,10 @@ def execute_multi_profile_search(target_video_file):
     # 様々な重みのプロファイル（合計1.0になるように設定）
     profiles = [
         {"name": "⚖️ バランス型", "w_mfcc": 0.15, "w_yamnet": 0.55, "w_kw": 0.15, "w_chroma": 0.15},
-        {"name": "🌊 波形・展開重視", "w_mfcc": 0.7, "w_yamnet": 0.1, "w_kw": 0.1, "w_chroma": 0.1},
-        {"name": "🎷 雰囲気(YAMNet)重視", "w_mfcc": 0.1, "w_yamnet": 0.7, "w_kw": 0.1, "w_chroma": 0.1},
-        {"name": "📝 キーワード意味重視", "w_mfcc": 0.2, "w_yamnet": 0.3, "w_kw": 0.5, "w_chroma": 0.0},
-        {"name": "🎼 メロディ(クロマ)重視", "w_mfcc": 0.1, "w_yamnet": 0.15, "w_kw": 0.05, "w_chroma": 0.7}
+        {"name": "🌊 展開重視", "w_mfcc": 0.7, "w_yamnet": 0.1, "w_kw": 0.1, "w_chroma": 0.1},
+        {"name": "🎷 雰囲気重視", "w_mfcc": 0.1, "w_yamnet": 0.7, "w_kw": 0.1, "w_chroma": 0.1},
+        {"name": "📝 キーワード重視", "w_mfcc": 0.2, "w_yamnet": 0.3, "w_kw": 0.5, "w_chroma": 0.0},
+        {"name": "🎼 メロディ重視", "w_mfcc": 0.1, "w_yamnet": 0.15, "w_kw": 0.05, "w_chroma": 0.7}
     ]
     # クロマDBが無い場合はメロディプロファイルを外し、他の重みからもクロマ分を除いて再配分
     if not use_chroma:
